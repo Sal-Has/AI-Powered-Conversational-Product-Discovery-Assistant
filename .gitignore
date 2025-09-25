@@ -1,0 +1,54 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pkl
+*.log
+*.sqlite*
+*.db
+.ipynb_checkpoints/
+
+# --- Virtual environments ---
+venv/
+.env
+*.env
+.env.*
+
+# --- Testing / Coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Node / React ---
+frontend/node_modules/
+frontend/.env
+frontend/.env.*
+frontend/build/
+frontend/dist/
+frontend/.next/
+frontend/npm-debug.log*
+frontend/yarn*.log
+
+# --- OS / IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Data / Cache / Models ---
+.cache/
+*.cache
+cache/
+data/
+
+# --- Vector DB / Chroma persistence (adjust if you use a different path) ---
+chroma/
+.chroma/
+backend/chroma*/
+backend/chromadb*/
+
+# --- Packaging ---
+*.egg-info/
+pip-wheel-metadata/
+site/
