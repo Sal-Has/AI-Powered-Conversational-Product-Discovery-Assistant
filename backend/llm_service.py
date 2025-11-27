@@ -1,10 +1,15 @@
 import os
 import json
+import time
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+from abc import ABC, abstractmethod
 from dotenv import load_dotenv
 from openai import OpenAI
+from huggingface_hub import InferenceClient
+
+from config import Config
 
 # Load environment variables from .env file
 load_dotenv()
@@ -13,38 +18,158 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+# ========== PROVIDER ABSTRACTION LAYER ==========
+
+class LLMProvider(ABC):
+    """Abstract base class for LLM providers."""
+    
+    @abstractmethod
+    def chat_completion(self, messages: List[Dict[str, str]], 
+                       temperature: float, max_tokens: int) -> tuple:
+        """Generate chat completion. Returns (text, metadata_dict)."""
+        pass
+
+
+class OpenAIProvider(LLMProvider):
+    """OpenAI GPT provider."""
+    
+    def __init__(self, api_key: str, model: str):
+        self.client = OpenAI(api_key=api_key)
+        self.model = model
+        logger.info(f"✅ OpenAI provider: {model}")
+    
+    def chat_completion(self, messages: List[Dict[str, str]], 
+                       temperature: float, max_tokens: int) -> tuple:
+        t0 = time.time()
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        latency_ms = (time.time() - t0) * 1000
+        text = response.choices[0].message.content.strip()
+        usage = getattr(response, "usage", None)
+        tokens = getattr(usage, "completion_tokens", None) if usage else None
+        
+        metadata = {
+            "provider": "openai",
+            "model": self.model,
+            "latency_ms": latency_ms,
+            "output_tokens": tokens
+        }
+        return text, metadata
+
+
+class HFGemmaProvider(LLMProvider):
+    """Hugging Face Gemma 3 provider."""
+    
+    def __init__(self, api_key: str, model: str):
+        self.client = InferenceClient(api_key=api_key)
+        self.model = model
+        logger.info(f"✅ HF Gemma provider: {model}")
+    
+    def chat_completion(self, messages: List[Dict[str, str]], 
+                       temperature: float, max_tokens: int) -> tuple:
+        t0 = time.time()
+        completion = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        latency_ms = (time.time() - t0) * 1000
+        text = completion.choices[0].message.content
+        usage = getattr(completion, "usage", None)
+        tokens = getattr(usage, "completion_tokens", None) if usage else None
+        
+        metadata = {
+            "provider": "hf_gemma3",
+            "model": self.model,
+            "latency_ms": latency_ms,
+            "output_tokens": tokens
+        }
+        return text, metadata
+
+
+class LocalGemmaProvider(LLMProvider):
+    """Local LM Studio Gemma provider."""
+    
+    def __init__(self, base_url: str, model: str):
+        self.client = OpenAI(base_url=base_url, api_key="lm-studio")  # LM Studio uses dummy key
+        self.model = model
+        logger.info(f"✅ Local Gemma provider: {model} at {base_url}")
+    
+    def chat_completion(self, messages: List[Dict[str, str]], 
+                       temperature: float, max_tokens: int) -> tuple:
+        t0 = time.time()
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        latency_ms = (time.time() - t0) * 1000
+        text = response.choices[0].message.content.strip()
+        usage = getattr(response, "usage", None)
+        tokens = getattr(usage, "completion_tokens", None) if usage else None
+        
+        metadata = {
+            "provider": "local_gemma3",
+            "model": self.model,
+            "latency_ms": latency_ms,
+            "output_tokens": tokens
+        }
+        return text, metadata
+
+
+# ========== MAIN LLM SERVICE (ALL YOUR ORIGINAL FUNCTIONS) ==========
+
 class LLMService:
     """
-    LLM service for generating conversational product recommendations
-    using OpenAI's GPT models in a RAG pipeline.
+    LLM service for generating conversational product recommendations.
+    Supports multiple providers: OpenAI GPT and Hugging Face Gemma 3.
     """
     
     def __init__(self, 
                  api_key: Optional[str] = None,
-                 model: str = "gpt-4o-mini",
+                 model: Optional[str] = None,
                  max_tokens: int = 1000,
-                 temperature: float = 0.7):
+                 temperature: float = 0.7,
+                 provider: Optional[str] = None):
         """
         Initialize the LLM service.
         
         Args:
-            api_key: OpenAI API key (optional, will use OPENAI_API_KEY env var)
-            model: OpenAI model to use
+            api_key: API key (optional, will auto-detect from env)
+            model: Model name (optional, uses config default)
             max_tokens: Maximum tokens in response
             temperature: Response creativity (0.0-1.0)
+            provider: 'openai' or 'local_gemma3' (optional, uses LLM_PROVIDER from config)
         """
-        self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
         
-        # Load API key from environment or parameter
-        api_key = api_key or os.getenv('OPENAI_API_KEY')
-        if not api_key:
-            raise ValueError("OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass api_key parameter.")
+        # Determine provider
+        self.provider_name = provider or Config.LLM_PROVIDER
         
-        # Simple client initialization without extra parameters
-        self.client = OpenAI(api_key=api_key)
-        logger.info(f"✅ LLM service initialized with model: {model}")
+        # Initialize provider
+        if self.provider_name == 'openai':
+            api_key = api_key or Config.OPENAI_API_KEY
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY required")
+            self.model = model or Config.OPENAI_MODEL
+            self.provider = OpenAIProvider(api_key=api_key, model=self.model)
+            
+        elif self.provider_name == 'local_gemma3':
+            self.model = model or Config.LOCAL_GEMMA_MODEL
+            self.provider = LocalGemmaProvider(base_url=Config.LOCAL_GEMMA_BASE_URL, model=self.model)
+            
+        else:
+            raise ValueError(f"Unknown provider: {self.provider_name}")
+        
+        logger.info(f"✅ LLM service initialized: {self.provider_name} / {self.model}")
     
     def generate_shopping_recommendation(self, 
                                        user_query: str, 
@@ -66,24 +191,15 @@ class LLMService:
         prompt = self._create_shopping_prompt(user_query, retrieved_products)
         
         try:
-            # Call OpenAI API
-            response = self.client.chat.completions.create(
-                model=self.model,
+            # Call LLM via provider abstraction
+            llm_response, metadata = self.provider.chat_completion(
                 messages=[
-                    {
-                        "role": "system",
-                        "content": self._get_system_prompt()
-                    },
-                    {
-                        "role": "user", 
-                        "content": prompt
-                    }
+                    {"role": "system", "content": self._get_system_prompt()},
+                    {"role": "user", "content": prompt}
                 ],
-                max_tokens=self.max_tokens,
-                temperature=self.temperature
+                temperature=self.temperature,
+                max_tokens=self.max_tokens
             )
-            
-            llm_response = response.choices[0].message.content.strip()
             
             # Prepare response with both LLM text and structured data
             result = {
@@ -93,6 +209,9 @@ class LLMService:
                 "products": retrieved_products,
                 "product_count": len(retrieved_products),
                 "model_used": self.model,
+                "provider": self.provider_name,
+                "latency_ms": metadata.get("latency_ms"),
+                "output_tokens": metadata.get("output_tokens"),
                 "generated_at": datetime.now().isoformat()
             }
             
@@ -190,6 +309,7 @@ Guidelines:
             "products": [],
             "product_count": 0,
             "model_used": self.model,
+            "provider": self.provider_name,
             "generated_at": datetime.now().isoformat()
         }
     
@@ -228,22 +348,25 @@ Guidelines:
         prompt += "Provide a detailed comparison highlighting the strengths and weaknesses of each product, and recommend which one offers the best value for different user needs."
         
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
+            # Call LLM via provider
+            llm_response, metadata = self.provider.chat_completion(
                 messages=[
                     {"role": "system", "content": self._get_system_prompt()},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=self.max_tokens,
-                temperature=self.temperature
+                temperature=self.temperature,
+                max_tokens=self.max_tokens
             )
             
             return {
                 "success": True,
-                "llm_response": response.choices[0].message.content.strip(),
+                "llm_response": llm_response,
                 "products": products,
                 "comparison_criteria": comparison_criteria,
                 "model_used": self.model,
+                "provider": self.provider_name,
+                "latency_ms": metadata.get("latency_ms"),
+                "output_tokens": metadata.get("output_tokens"),
                 "generated_at": datetime.now().isoformat()
             }
             
@@ -255,3 +378,31 @@ Guidelines:
                 "llm_response": "I'm having trouble generating a comparison right now. Please try again later.",
                 "products": products
             }
+    
+    def get_provider_info(self) -> Dict[str, str]:
+        """Get information about the current provider."""
+        return {
+            "provider": self.provider_name,
+            "model": self.model
+        }
+    
+    def generate(self, messages: List[Dict[str, str]], 
+                temperature: float = None, max_tokens: int = None) -> Dict[str, Any]:
+        """Simple generate method for testing. Wraps provider.chat_completion()."""
+        temp = temperature if temperature is not None else self.temperature
+        tokens = max_tokens if max_tokens is not None else self.max_tokens
+        
+        text, metadata = self.provider.chat_completion(
+            messages=messages,
+            temperature=temp,
+            max_tokens=tokens
+        )
+        
+        return {
+            "text": text,
+            "latency_ms": metadata.get("latency_ms"),
+            "output_tokens": metadata.get("output_tokens"),
+            "output_chars": len(text),
+            "provider": self.provider_name,
+            "model": self.model
+        }
