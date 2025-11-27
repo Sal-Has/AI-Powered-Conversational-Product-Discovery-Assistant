@@ -102,15 +102,74 @@ export const authAPI = {
   },
 };
 
-// Chatbot API functions (placeholder for future implementation)
+// RAG Chatbot API functions
 export const chatbotAPI = {
-  sendMessage: async (message) => {
-    const response = await api.post('/chatbot/message', { message });
+  // Send query to RAG chat endpoint
+  sendQuery: async (query) => {
+    const response = await api.post('/chat', { query });
     return response.data;
   },
 
-  getChatHistory: async () => {
-    const response = await api.get('/chatbot/history');
+  // Direct semantic search without conversation
+  searchProducts: async (query, k = 5, score_threshold = 0.0) => {
+    const response = await api.post('/search', { 
+      query, 
+      k, 
+      score_threshold 
+    });
+    return response.data;
+  },
+
+  // Get system status
+  getStatus: async () => {
+    const response = await api.get('/status');
+    return response.data;
+  },
+
+  // Health check
+  getHealth: async () => {
+    const response = await api.get('/health');
+    return response.data;
+  },
+
+  // Chat session management
+  createChatSession: async (title = 'New Chat') => {
+    const response = await api.post('/chats', { title });
+    return response.data;
+  },
+
+  getChatSessions: async () => {
+    const response = await api.get('/chats');
+    return response.data;
+  },
+
+  getChatSession: async (sessionId) => {
+    const response = await api.get(`/chats/${sessionId}`);
+    return response.data;
+  },
+
+  deleteChatSession: async (sessionId) => {
+    const response = await api.delete(`/chats/${sessionId}`);
+    return response.data;
+  },
+
+  addMessageToSession: async (sessionId, messageData) => {
+    const response = await api.post(`/chats/${sessionId}/messages`, messageData);
+    return response.data;
+  },
+
+  // Check live price and availability for a product
+  checkLiveProduct: async (productId, url) => {
+    if (!productId && !url) {
+      throw new Error('productId or url is required for live check');
+    }
+
+    const config = {};
+    if (url) {
+      config.params = { url };
+    }
+
+    const response = await api.get(`/products/${productId}/check_live`, config);
     return response.data;
   },
 };
