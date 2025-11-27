@@ -142,22 +142,30 @@ class BasicJumiaScraper:
         return 0
 
     def scrape_smartphones(self, max_pages=2):
-        """
-        Scrape smartphones from Jumia using the proven working scraping logic.
+        """Scrape Android/general smartphones from Jumia."""
+        return self._scrape_category(
+            start_url="https://www.jumia.co.ke/smartphones/",
+            max_pages=max_pages,
+            category_name="smartphones"
+        )
+
+    def scrape_ios_phones(self, max_pages=5):
+        """Scrape iOS phones from Jumia using the same logic as smartphones."""
+        return self._scrape_category(
+            start_url="https://www.jumia.co.ke/ios-phones/",
+            max_pages=max_pages,
+            category_name="ios_phones"
+        )
+
+    def _scrape_category(self, start_url: str, max_pages: int, category_name: str):
+        """Generic category scraper reused by both smartphones and iOS phones."""
+        print(f"🔄 Starting scraping for {category_name} (max {max_pages} pages)...")
         
-        Args:
-            max_pages: Maximum number of pages to scrape
-            
-        Returns:
-            List of product dictionaries
-        """
-        print(f"🔄 Starting smartphone scraping (max {max_pages} pages)...")
-        
-        url = "https://www.jumia.co.ke/smartphones/"
+        url = start_url
         all_products = []
         
         for page in range(max_pages):
-            print(f"📄 Scraping page {page + 1}...")
+            print(f"📄 Scraping page {page + 1} of {category_name}...")
             
             try:
                 response_content = requests.get(url, headers=self.headers)
@@ -166,13 +174,13 @@ class BasicJumiaScraper:
 
                 product_cards = soup.find(name="div", class_="-phs -pvxs row _no-g _4cl-3cm-shs")
                 if not product_cards:
-                    print(f"⚠️ No product cards found on page {page + 1}")
+                    print(f"⚠️ No product cards found on page {page + 1} for {category_name}")
                     break
                     
                 articles = product_cards.find_all(name="article", class_="prd _fb col c-prd")
                 
                 if not articles:
-                    print(f"⚠️ No articles found on page {page + 1}")
+                    print(f"⚠️ No articles found on page {page + 1} for {category_name}")
                     break
 
                 for article in articles:
@@ -189,6 +197,11 @@ class BasicJumiaScraper:
                         name = info.find(name="h3", class_="name")
                         price = info.find(name="div", class_="prc")
                         rev = info.find(name="div", class_="rev")
+                        
+                        # Extract image URL from listing page (efficient approach)
+                        image_div = article.find("div", class_="img-c")
+                        img_tag = image_div.find("img", class_="img") if image_div else None
+                        image_url = img_tag["data-src"] if img_tag and img_tag.has_attr("data-src") else ""
 
                         if not name or not price:
                             continue
@@ -211,19 +224,6 @@ class BasicJumiaScraper:
                         )
 
                         description_data = self.extract_product_description(product_description_container)
-                        
-                        # Extract image URL
-                        image_url = ""
-                        try:
-                            img_container = another_soup.find("div", class_="img-c")
-                            if img_container:
-                                img_tag = img_container.find("img")
-                                if img_tag and img_tag.get("data-src"):
-                                    image_url = img_tag["data-src"]
-                                elif img_tag and img_tag.get("src"):
-                                    image_url = img_tag["src"]
-                        except:
-                            pass
 
                         # Parse price to numeric value
                         price_text = self.clean_text(price.text)
@@ -243,15 +243,16 @@ class BasicJumiaScraper:
                             "image_url": image_url,
                             "description": description_data["text"],
                             "specs": json.dumps(description_data["specs"]),
-                            "category": "smartphones",
+                            "category": category_name,
                             "scraped_at": datetime.now().isoformat()
                         }
 
                         all_products.append(product_data)
-                        print(f"✅ Scraped: {product_data['name']}")
+                        print(f"✅ Scraped ({category_name}): {product_data['name']}")
+                        print(f"🖼️ Image URL: {image_url}")
 
                     except Exception as e:
-                        print(f"⚠️ Error scraping individual product: {e}")
+                        print(f"⚠️ Error scraping individual product in {category_name}: {e}")
                         continue
 
                 # Go to next page
@@ -264,21 +265,21 @@ class BasicJumiaScraper:
                             url = next_page_link
                             time.sleep(0.5)  # Be respectful between pages
                         else:
-                            print(f"📄 No more pages found after page {page + 1}")
+                            print(f"📄 No more pages found after page {page + 1} for {category_name}")
                             break
                     else:
-                        print(f"📄 No pagination found after page {page + 1}")
+                        print(f"📄 No pagination found after page {page + 1} for {category_name}")
                         break
                         
                 except Exception as e:
-                    print(f"⚠️ Error finding next page: {e}")
+                    print(f"⚠️ Error finding next page for {category_name}: {e}")
                     break
 
             except Exception as e:
-                print(f"❌ Error scraping page {page + 1}: {e}")
+                print(f"❌ Error scraping page {page + 1} for {category_name}: {e}")
                 break
 
-        print(f"✅ Scraping completed. Found {len(all_products)} products")
+        print(f"✅ Scraping completed for {category_name}. Found {len(all_products)} products")
         return all_products
 
     def store_products(self, products):
@@ -399,11 +400,17 @@ class BasicJumiaScraper:
         }
 
     def run_complete_pipeline(self, max_pages: int = 2, save_excel: bool = True):
-        """Run the complete scraping and storage pipeline."""
+        """Run the complete scraping and storage pipeline for smartphones + iOS phones."""
         print("🚀 Starting Basic Jumia Scraper Pipeline...")
         
-        # Scrape products
-        products = self.scrape_smartphones(max_pages)
+        # Scrape Android/general smartphones
+        smartphones = self.scrape_smartphones(max_pages)
+        
+        # Scrape iOS phones (fixed 5 pages as requested)
+        ios_phones = self.scrape_ios_phones(max_pages=5)
+        
+        # Combine all products
+        products = smartphones + ios_phones
         
         if not products:
             print("❌ No products scraped")
@@ -437,7 +444,9 @@ def main():
     scraper = BasicJumiaScraper()
     
     # Run the complete pipeline
-    result = scraper.run_complete_pipeline(max_pages=2, save_excel=True)
+    # max_pages: How many pages to scrape (each page ~8-10 products)
+    # 25 pages = ~200-250 products (from current 80 with 10 pages)
+    result = scraper.run_complete_pipeline(max_pages=25, save_excel=True)
     print(f"\n🎉 Scraping completed: {result}")
     
     # Test search functionality
@@ -452,7 +461,7 @@ def main():
         
         for query in search_queries:
             print(f"\nSearching for: '{query}'")
-            results = scraper.search_products(query, k=3)
+            results = scraper.search_products(query, limit=3)
             for i, product in enumerate(results, 1):
                 print(f"  {i}. {product['name']} - {product['price_text']}")
                 if product['specs']:
