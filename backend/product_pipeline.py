@@ -277,6 +277,150 @@ class JumiaProductPipeline:
             logger.error(f"❌ Search failed: {e}")
             raise
     
+    def hybrid_search(self, query: str, k: int = 5, score_threshold: float = 0.0) -> List[Dict[str, Any]]:
+        """
+        Enhanced hybrid search with intelligent re-ranking.
+        Combines semantic similarity with metadata-based boosting.
+        
+        Args:
+            query: Search query
+            k: Number of results to return
+            score_threshold: Minimum similarity score
+            
+        Returns:
+            List of re-ranked products with boosted scores
+        """
+        if not query.strip():
+            return []
+        
+        logger.info(f"🔍 Hybrid search for: '{query}' (k={k})")
+        
+        # Get more results than needed for re-ranking
+        initial_k = min(k * 3, 30)
+        results = self.semantic_search(query, k=initial_k, score_threshold=score_threshold)
+        
+        if not results:
+            return []
+        
+        # Parse query for boosting hints
+        query_lower = query.lower()
+        query_tokens = set(query_lower.split())
+        
+        # Extract query features
+        has_price_constraint = any(word in query_lower for word in ['under', 'below', 'less than', 'budget', 'cheap', 'affordable'])
+        has_ram_query = any(word in query_lower for word in ['ram', 'memory'])
+        has_storage_query = any(word in query_lower for word in ['storage', 'gb', 'rom'])
+        has_camera_query = any(word in query_lower for word in ['camera', 'photo', 'photography', 'mp'])
+        has_battery_query = any(word in query_lower for word in ['battery', 'mah'])
+        has_gaming_query = any(word in query_lower for word in ['gaming', 'game', 'performance'])
+        
+        # Extract brand preference
+        brands = ['samsung', 'iphone', 'apple', 'xiaomi', 'redmi', 'oppo', 'tecno', 'infinix', 'nokia', 'huawei']
+        query_brand = None
+        for brand in brands:
+            if brand in query_lower:
+                query_brand = brand
+                break
+        
+        # Extract price constraint
+        price_limit = None
+        try:
+            import re
+            price_match = re.search(r'under\s+(\d+)|below\s+(\d+)|less\s+than\s+(\d+)', query_lower)
+            if price_match:
+                price_limit = int(price_match.group(1) or price_match.group(2) or price_match.group(3))
+        except:
+            pass
+        
+        # Re-rank results with optimized boost factors
+        for product in results:
+            boost_score = 1.0
+            product_name_lower = product['name'].lower()
+            
+            # 1. Exact brand match boost (strong signal) - Increased from 1.3 to 1.35
+            if query_brand and query_brand in product_name_lower:
+                boost_score *= 1.35
+                logger.debug(f"Brand boost for {product['name'][:30]}")
+            
+            # 2. Keyword overlap boost
+            product_tokens = set(product_name_lower.split())
+            overlap = len(query_tokens & product_tokens)
+            if overlap > 0:
+                keyword_boost = 1.0 + (overlap * 0.05)  # +5% per matching keyword
+                boost_score *= keyword_boost
+            
+            # 3. Price constraint boost - STRENGTHENED
+            if has_price_constraint and price_limit and product.get('price_numeric'):
+                product_price = product['price_numeric']
+                if product_price <= price_limit:
+                    # Boost products under the limit, more boost for lower prices
+                    # Changed from 1.2 to 1.4 for stronger price match signal
+                    price_ratio = product_price / price_limit
+                    # Products well under budget get up to 40% boost
+                    price_boost = 1.4 * (1.2 - price_ratio * 0.4)
+                    boost_score *= price_boost
+                elif product_price > price_limit:
+                    # Stronger penalty for over-budget: 0.7 -> 0.55
+                    boost_score *= 0.55
+            
+            # 4. Feature-specific boosts - STRENGTHENED
+            if has_camera_query:
+                # Increased from 1.15 to 1.3 for high-MP cameras
+                if any(x in product_name_lower for x in ['64mp', '108mp', '200mp']):
+                    boost_score *= 1.35  # Premium cameras
+                elif any(x in product_name_lower for x in ['50mp', '48mp']):
+                    boost_score *= 1.3   # Good cameras
+                elif 'camera' in product_name_lower:
+                    boost_score *= 1.15  # Camera mentioned
+            
+            if has_ram_query:
+                # Increased RAM boost: 1.2 -> 1.25 for 8GB
+                if '12gb' in product_name_lower or '12 gb' in product_name_lower:
+                    boost_score *= 1.3   # Premium RAM
+                elif '8gb' in product_name_lower or '8 gb' in product_name_lower:
+                    boost_score *= 1.25  # High RAM
+                elif '6gb' in product_name_lower or '6 gb' in product_name_lower:
+                    boost_score *= 1.15  # Good RAM
+                elif '4gb' in product_name_lower or '4 gb' in product_name_lower:
+                    boost_score *= 1.05  # Minimum RAM
+            
+            if has_storage_query:
+                # Increased storage boost
+                if '512gb' in product_name_lower or '512 gb' in product_name_lower:
+                    boost_score *= 1.25
+                elif '256gb' in product_name_lower or '256 gb' in product_name_lower:
+                    boost_score *= 1.2
+                elif '128gb' in product_name_lower or '128 gb' in product_name_lower:
+                    boost_score *= 1.1
+            
+            if has_battery_query:
+                # Tiered battery boost
+                if any(x in product_name_lower for x in ['6000mah', '7000mah']):
+                    boost_score *= 1.25  # Large batteries
+                elif '5000mah' in product_name_lower:
+                    boost_score *= 1.15  # Standard large battery
+            
+            if has_gaming_query:
+                # Gaming phones need high RAM - strengthened boost
+                if '12gb' in product_name_lower:
+                    boost_score *= 1.3
+                elif '8gb' in product_name_lower:
+                    boost_score *= 1.25
+            
+            # 5. Apply boost to similarity score
+            product['original_score'] = product['similarity_score']
+            product['boost_factor'] = boost_score
+            product['similarity_score'] = product['similarity_score'] * boost_score
+        
+        # Sort by boosted score
+        results.sort(key=lambda x: x['similarity_score'], reverse=True)
+        
+        # Return top k
+        final_results = results[:k]
+        
+        logger.info(f"✅ Hybrid search returned {len(final_results)} re-ranked products")
+        return final_results
+    
     def get_collection_stats(self) -> Dict[str, Any]:
         """Get collection statistics."""
         try:
@@ -314,12 +458,18 @@ class JumiaProductPipeline:
         # For now, use the smartphone scraper as a base
         # In a full implementation, you'd extend this to handle different categories
         try:
-            # Calculate total pages based on products per category
-            max_pages = max(1, max_products_per_category // 20)  # ~20 products per page
-            
-            products = self.scraper.scrape_smartphones(max_pages=max_pages)
-            all_products.extend(products)
-            
+            max_pages = max(1, max_products_per_category // 20)
+
+            for url in category_urls:
+                if "ios-phones" in url:
+                    # Fixed 5 pages for iOS as requested
+                    logger.info("📱 Scraping iOS phones...")
+                    products = self.scraper.scrape_ios_phones(max_pages=5)
+                else:
+                    logger.info("🤖 Scraping smartphones...")
+                    products = self.scraper.scrape_smartphones(max_pages=max_pages)
+
+                all_products.extend(products)            
         except Exception as e:
             logger.error(f"❌ Scraping failed: {e}")
             return {
@@ -340,6 +490,15 @@ class JumiaProductPipeline:
             }
         
         try:
+            # Deduplicate products by ID before generating embeddings / upsert
+            if all_products:
+                unique_by_id = {}
+                for p in all_products:
+                    pid = p.get('id')
+                    if pid:
+                        unique_by_id[pid] = p  # last one wins; that’s fine
+                all_products = list(unique_by_id.values())
+                logger.info(f"🧹 Deduplicated products by ID: {len(all_products)} unique products")
             # Generate embeddings
             products_with_embeddings = self.generate_embeddings(all_products)
             
@@ -389,10 +548,14 @@ def main():
     pipeline = JumiaProductPipeline()
     
     # Test scraping and storage
+    # Increase max_products_per_category to get more products (10 → 50 or 100)
     result = pipeline.run_pipeline(
-        category_urls=["https://www.jumia.co.ke/smartphones/"],
-        max_products_per_category=10
-    )
+    category_urls=[
+        "https://www.jumia.co.ke/smartphones/",
+        "https://www.jumia.co.ke/ios-phones/",
+    ],
+    max_products_per_category=50
+)
     
     print(f"Pipeline result: {result}")
     
@@ -408,7 +571,7 @@ def main():
         
         for query in search_queries:
             print(f"\nSearching: '{query}'")
-            results = pipeline.semantic_search(query, k=3)
+            results = pipeline.hybrid_search(query, k=3)
             
             for i, product in enumerate(results, 1):
                 print(f"  {i}. {product['name']} (Score: {product['similarity_score']:.3f})")

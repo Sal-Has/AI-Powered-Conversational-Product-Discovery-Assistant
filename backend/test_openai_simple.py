@@ -30,7 +30,7 @@ def test_openai_client():
         
         # Test a simple completion
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a helpful shopping assistant."},
                 {"role": "user", "content": "Recommend a Samsung phone under 30000"}

@@ -28,7 +28,7 @@ def test_client():
         
         # Test API call
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a helpful shopping assistant."},
                 {"role": "user", "content": "Recommend a good smartphone under $500"}
@@ -50,3 +50,5 @@ if __name__ == "__main__":
         print("\n🎉 OpenAI client is working correctly!")
     else:
         print("\n❌ OpenAI client test failed")
+
+        

@@ -3,6 +3,8 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 import logging
 from product_pipeline import JumiaProductPipeline
 import os
+import threading
+from datetime import datetime
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -13,6 +15,7 @@ product_bp = Blueprint('products', __name__)
 # Initialize pipeline (singleton pattern)
 pipeline = None
 
+
 def get_pipeline():
     """Get or create pipeline instance."""
     global pipeline
@@ -22,6 +25,40 @@ def get_pipeline():
             chroma_persist_directory="./chroma_db"
         )
     return pipeline
+
+
+# Simple in-memory status for the last background scrape job
+scrape_job_status = {
+    "running": False,
+    "last_started_at": None,
+    "last_finished_at": None,
+    "last_result": None,
+    "last_error": None,
+}
+
+
+def _run_scrape_job(category_urls, max_products_per_category: int):
+    """Background worker that runs the scraping pipeline and updates scrape_job_status."""
+    global scrape_job_status
+
+    scrape_job_status["running"] = True
+    scrape_job_status["last_started_at"] = datetime.utcnow().isoformat()
+    scrape_job_status["last_finished_at"] = None
+    scrape_job_status["last_result"] = None
+    scrape_job_status["last_error"] = None
+
+    try:
+        logger.info(f"🚀 Background scrape job started for {len(category_urls)} categories")
+        pipeline_instance = get_pipeline()
+        result = pipeline_instance.run_pipeline(category_urls, max_products_per_category)
+        scrape_job_status["last_result"] = result
+        logger.info(f"✅ Background scrape job completed: {result}")
+    except Exception as e:
+        logger.error(f"❌ Background scrape job failed: {e}")
+        scrape_job_status["last_error"] = str(e)
+    finally:
+        scrape_job_status["running"] = False
+        scrape_job_status["last_finished_at"] = datetime.utcnow().isoformat()
 
 @product_bp.route('/scrape', methods=['POST'])
 @jwt_required()
@@ -74,6 +111,76 @@ def scrape_products():
     except Exception as e:
         logger.error(f"Error in scrape_products: {str(e)}")
         return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
+
+
+@product_bp.route('/scrape_async', methods=['POST'])
+@jwt_required()
+def scrape_products_async():
+    """Start a background scrape job without blocking the request.
+
+    Uses the same payload as /products/scrape but returns immediately with
+    a status object. Poll /products/scrape_status to see progress/results.
+    """
+    try:
+        current_user = get_jwt_identity()
+        logger.info(f"User {current_user} initiated ASYNC product scraping")
+
+        data = request.get_json() or {}
+
+        # Validate input
+        category_urls = data.get('category_urls')
+        max_products_per_category = data.get('max_products_per_category', 20)
+
+        if not isinstance(category_urls, list) or not category_urls:
+            return jsonify({'error': 'category_urls must be a non-empty list'}), 400
+
+        for url in category_urls:
+            if not isinstance(url, str) or not url.startswith('http'):
+                return jsonify({'error': f'Invalid URL: {url}'}), 400
+
+        # If a job is already running, avoid starting another one
+        if scrape_job_status.get('running'):
+            return jsonify({
+                'success': False,
+                'message': 'A scrape job is already running',
+                'status': scrape_job_status
+            }), 409
+
+        # Start background thread
+        thread = threading.Thread(
+            target=_run_scrape_job,
+            args=(category_urls, max_products_per_category),
+            daemon=True,
+        )
+        thread.start()
+
+        return jsonify({
+            'success': True,
+            'message': 'Background scrape job started',
+            'status': scrape_job_status,
+            'user': current_user
+        }), 202
+
+    except Exception as e:
+        logger.error(f"Error in scrape_products_async: {str(e)}")
+        return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
+
+
+@product_bp.route('/scrape_status', methods=['GET'])
+@jwt_required()
+def scrape_products_status():
+    """Get the status of the last background scrape job."""
+    try:
+        current_user = get_jwt_identity()
+        return jsonify({
+            'success': True,
+            'status': scrape_job_status,
+            'user': current_user
+        }), 200
+    except Exception as e:
+        logger.error(f"Error in scrape_products_status: {str(e)}")
+        return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
+
 
 @product_bp.route('/search', methods=['POST'])
 @jwt_required()
